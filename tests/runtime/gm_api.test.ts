@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it, vi, vitest } from "vitest";
 import { addTestPermission, initTestGMApi } from "@Tests/utils";
 import { mockNetwork } from "@Tests/mocks/network";
 import { setMockNetworkResponse } from "@Tests/mocks/response";
+import type { ConfirmParam } from "@App/app/service/service_worker/permission_verify";
 
 const customXhrResponseMap = new Map<
   string,
@@ -471,5 +472,97 @@ describe("GM download", () => {
     expect(calledBlob).toEqual(originalBlob);
 
     createObjectURLSpy.mockRestore();
+  });
+});
+
+describe("GM download 跨域权限 - native 模式 @connect 校验", () => {
+  // 构造一个带 @connect 的下载脚本及对应的 content GMApi；onConfirm 模拟用户在弹窗中的选择
+  const makeDownloadGM = async (onConfirm?: (c: ConfirmParam) => { allow: boolean; type: number }) => {
+    const msg = initTestGMApi({ realVerify: true, onConfirm });
+    const dlScript: Script = {
+      uuid: randomUUID(),
+      name: "test-download-connect",
+      metadata: {
+        grant: ["GM_download"],
+        connect: ["example.com"], // 仅允许 example.com
+      },
+      namespace: "",
+      type: 1,
+      status: 1,
+      sort: 0,
+      runStatus: "running",
+      createtime: 0,
+      checktime: 0,
+    };
+    await new ScriptDAO().save(dlScript);
+    return new GMApi("serviceWorker", msg, undefined as any, <ScriptRunResource>{ uuid: dlScript.uuid });
+  };
+
+  it("在 @connect 列表内的域名：直接放行，下载成功", async () => {
+    const gmApi = await makeDownloadGM(() => ({ allow: true, type: 1 }));
+    const testUrl = "https://example.com/in-connect.bin";
+    setMockNetworkResponse(testUrl, { data: new Blob(["ok"]), contentType: "application/octet-stream" });
+    const spy = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:http://localhost/mock");
+    const onload = vitest.fn();
+    const onerror = vitest.fn();
+    await new Promise<void>((resolve) => {
+      gmApi.GM_download({
+        url: testUrl,
+        name: "x.bin",
+        onload: () => {
+          onload();
+          resolve();
+        },
+        onerror: () => {
+          onerror();
+          resolve();
+        },
+      });
+    });
+    spy.mockRestore();
+    expect(onload).toBeCalled();
+  });
+
+  it("不在 @connect 列表内：弹窗询问，用户允许后下载成功", async () => {
+    const onConfirm = vitest.fn(() => ({ allow: true, type: 1 }));
+    const gmApi = await makeDownloadGM(onConfirm);
+    const testUrl = "https://not-in-connect-allow.test/secret.bin";
+    setMockNetworkResponse(testUrl, { data: new Blob(["secret"]), contentType: "application/octet-stream" });
+    const spy = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:http://localhost/mock");
+    const onload = vitest.fn();
+    const onerror = vitest.fn();
+    await new Promise<void>((resolve) => {
+      gmApi.GM_download({
+        url: testUrl,
+        name: "secret.bin",
+        onload: () => {
+          onload();
+          resolve();
+        },
+        onerror: () => {
+          onerror();
+          resolve();
+        },
+      });
+    });
+    spy.mockRestore();
+    // 与 TM 的区别：未声明的域名不是静默放行、也不是直接拒绝，而是弹窗询问用户
+    expect(onConfirm).toBeCalled();
+    expect(onload).toBeCalled();
+  });
+
+  it("不在 @connect 列表内：用户拒绝则不下载", async () => {
+    const onConfirm = vitest.fn(() => ({ allow: false, type: 1 }));
+    const gmApi = await makeDownloadGM(onConfirm);
+    const testUrl = "https://not-in-connect-deny.test/secret.bin";
+    setMockNetworkResponse(testUrl, { data: new Blob(["secret"]), contentType: "application/octet-stream" });
+    const spy = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:http://localhost/mock");
+    const onload = vitest.fn();
+    gmApi.GM_download({ url: testUrl, name: "secret.bin", onload });
+    // 等待权限流程结算（弹窗 -> 拒绝）
+    await new Promise((r) => setTimeout(r, 150));
+    spy.mockRestore();
+    expect(onConfirm).toBeCalled();
+    expect(onload).not.toBeCalled();
   });
 });

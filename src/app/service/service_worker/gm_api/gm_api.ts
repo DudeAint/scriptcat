@@ -762,9 +762,11 @@ export default class GMApi {
   }
 
   // GM_xmlhttpRequest 与 native GM_download 共用的跨域校验（@connect / 黑名单 / 站点访问）
+  // softConnect=true（GM_download）：未列入 @connect 的域名改为弹窗询问而非直接拒绝，避免破坏 TM 下载脚本
   private async verifyXhrConnect(
     request: GMApiRequest<[GMSend.XHRDetails?]>,
-    sender: IGetSender
+    sender: IGetSender,
+    softConnect = false
   ): Promise<boolean | ConfirmParam> {
     const msgConn = sender.getConnect();
     if (!msgConn) {
@@ -865,8 +867,11 @@ export default class GMApi {
         if (ret && ret.allow) {
           return hasOriginPermission ? true : confirmExtensionSiteAccess();
         }
-        const msg = `Refused to connect to "${details.url}": This domain is not a part of the @connect list`;
-        throw throwErrorFn(msg);
+        // softConnect（GM_download）：不直接拒绝，落到下方用户确认，由用户决定是否放行
+        if (!softConnect) {
+          const msg = `Refused to connect to "${details.url}": This domain is not a part of the @connect list`;
+          throw throwErrorFn(msg);
+        }
       }
       // 其他情况：要询问用户
     }
@@ -1303,12 +1308,13 @@ export default class GMApi {
   }
 
   @PermissionVerify.API({
-    // native 下载会发起真实跨域请求，需与 GM_xmlhttpRequest 一样校验（@connect / 黑名单 / 站点访问）
+    // native 下载会发起真实跨域请求，需校验黑名单 / 站点访问 / @connect。
+    // 与 TM 不同（TM 的 @connect 只作用于 xhr/fetch），未列入 @connect 的域名改为弹窗询问由用户决定，而非直接拒绝。
     confirm: async (request, sender, gmApi) => {
       if (request.params[0]?.downloadMode !== "native") {
         return true;
       }
-      return gmApi.verifyXhrConnect(request, sender);
+      return gmApi.verifyXhrConnect(request, sender, true);
     },
   })
   async GM_download(request: GMApiRequest<[GMTypes.DownloadDetails<string>]>, sender: IGetSender) {
